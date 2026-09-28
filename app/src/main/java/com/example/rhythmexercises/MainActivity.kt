@@ -18,6 +18,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -26,6 +31,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -52,7 +58,8 @@ enum class Judgment(val text: String, val color: Color) {
 // ゲームの状態データ
 data class RhythmGameState(
     val isPlaying: Boolean = false,
-    val bpm: Int = 100,
+    val currentBeat: Int = 1,
+    val bpm: Int = 120,
     val score: Int = 0,
     val combo: Int = 0,
     val lastJudgment: Judgment = Judgment.NONE,
@@ -75,23 +82,42 @@ class RhythmGameViewModel : ViewModel() {
         }
     }
 
+    fun setBpm(newBpm: Int) {
+        // 40〜240の範囲内に制限（極端な値によるクラッシュを防ぐため）
+        val clampedBpm = newBpm.coerceIn(40, 240)
+        _uiState.update { it.copy(bpm = clampedBpm) }
+    }
+
     private fun startGame() {
         _uiState.value = RhythmGameState(isPlaying = true, bpm = _uiState.value.bpm)
 
-        // BPMから1拍あたりのミリ秒を計算 (60,000ms / BPM)
-        val intervalMs = (60_000 / _uiState.value.bpm).toLong()
+        var beatCount = 0
 
         gameJob = viewModelScope.launch {
             while (_uiState.value.isPlaying) {
                 lastBeatTime = System.currentTimeMillis()
+                beatCount = (beatCount % 4) + 1 // 1 -> 2 -> 3 -> 4 -> 1
 
-                // 拍が鳴った瞬間に画面を軽く点滅させる
-                _uiState.value = _uiState.value.copy(isBeatFlash = true)
-                delay(100)
-                _uiState.value = _uiState.value.copy(isBeatFlash = false)
+                // 拍数更新と点滅ON
+                _uiState.update { currentState ->
+                    currentState.copy(
+                        isBeatFlash = true,
+                        currentBeat = beatCount
+                    )
+                }
+
+                // 100ms後に点滅のみOFFにする非同期処理
+                launch {
+                    delay(100)
+                    _uiState.update { it.copy(isBeatFlash = false) }
+                }
+
+                // 最新のBPMから1拍あたりの待機時間を計算
+                val currentBpm = _uiState.value.bpm
+                val intervalMs = 60_000L / currentBpm
 
                 // 次の拍まで待機
-                delay(intervalMs - 100)
+                delay(intervalMs)
             }
         }
     }
@@ -135,6 +161,29 @@ class RhythmGameViewModel : ViewModel() {
 // UI画面
 @Composable
 fun RhythmGameScreen(viewModel: RhythmGameViewModel = viewModel()) {
+    val uiState by viewModel.uiState.collectAsState()
+
+    // 1. ComposeからContext（画面の情報）を取得
+    val context = LocalContext.current
+
+    // 2. SoundPlayerのインスタンスを生成・保持
+    val soundPlayer = remember { MetronomeSoundPlayer(context) }
+
+    // 3. 画面が閉じられたときに音源リソースを解放する
+    DisposableEffect(Unit) {
+        onDispose {
+            soundPlayer.release()
+        }
+    }
+
+    // 4. 拍（currentBeat）が更新されるたびに音を鳴らす
+    LaunchedEffect(uiState.currentBeat) {
+        if (uiState.isPlaying && uiState.currentBeat > 0) {
+            // currentBeat (1〜4) を 0〜3 のインデックスに変換して再生
+            soundPlayer.playBeat((uiState.currentBeat - 1) % 4)
+        }
+    }
+
     val state by viewModel.uiState.collectAsState()
 
     // メトロノームの点滅色アニメーション
@@ -152,10 +201,30 @@ fun RhythmGameScreen(viewModel: RhythmGameViewModel = viewModel()) {
     ) {
         // ヘッダー・スコア表示
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("メトロノーム・タップ", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("Rhythm Exercises", fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(16.dp))
             Text("SCORE: ${state.score}", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
             Text("COMBO: ${state.combo}", fontSize = 18.sp, color = MaterialTheme.colorScheme.primary)
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "BPM: ${state.bpm}",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Slider(
+                value = state.bpm.toFloat(),
+                onValueChange = { newBpm ->
+                    viewModel.setBpm(newBpm.toInt())
+                },
+                valueRange = 60f..200f,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
         }
 
         // メトロノームのビジュアルインジケーター（円が点滅）
@@ -204,7 +273,7 @@ fun RhythmGameScreen(viewModel: RhythmGameViewModel = viewModel()) {
                 onClick = { viewModel.toggleGame() },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(if (state.isPlaying) "ゲーム終了" else "スタート")
+                Text(if (state.isPlaying) "Exit" else "Start")
             }
         }
     }
