@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
 import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
@@ -91,9 +92,12 @@ class RhythmGameViewModel : ViewModel() {
     private fun startGame() {
         _uiState.value = RhythmGameState(isPlaying = true, bpm = _uiState.value.bpm)
 
-        var beatCount = 0
+        // Dispatchers.Default でバックグラウンドスレッドに逃がし、UI描画の重さに影響されないようにする
+        gameJob = viewModelScope.launch(Dispatchers.Default) {
+            var beatCount = 0
+            // 開始時点の絶対時間（ナノ秒）を取得
+            var nextBeatTimeNanos = System.nanoTime()
 
-        gameJob = viewModelScope.launch {
             while (_uiState.value.isPlaying) {
                 lastBeatTime = System.currentTimeMillis()
                 beatCount = (beatCount % 4) + 1 // 1 -> 2 -> 3 -> 4 -> 1
@@ -106,18 +110,29 @@ class RhythmGameViewModel : ViewModel() {
                     )
                 }
 
-                // 100ms後に点滅のみOFFにする非同期処理
+                // 点滅のみOFFにする非同期処理（点滅時間は少し短めの80msが見やすいです）
                 launch {
-                    delay(100)
+                    delay(80)
                     _uiState.update { it.copy(isBeatFlash = false) }
                 }
 
-                // 最新のBPMから1拍あたりの待機時間を計算
+                // 1拍あたりの時間（ナノ秒）を計算 (1秒 = 1,000,000,000ナノ秒)
                 val currentBpm = _uiState.value.bpm
-                val intervalMs = 60_000L / currentBpm
+                val intervalNanos = 60_000_000_000L / currentBpm
 
-                // 次の拍まで待機
-                delay(intervalMs)
+                // 次の拍が鳴るべき「理想の絶対時刻」を加算
+                nextBeatTimeNanos += intervalNanos
+
+                // 「理想の時刻」と「現在のリアル時間」の差分（＝あと何ナノ秒休むべきか）を計算
+                val sleepNanos = nextBeatTimeNanos - System.nanoTime()
+
+                if (sleepNanos > 0) {
+                    // ナノ秒からミリ秒に変換して正確な待機時間だけ休む（累積誤差をキャンセル）
+                    delay(sleepNanos / 1_000_000L)
+                } else {
+                    // 大幅な処理遅延などで目標時間を過ぎてしまった場合は基準時間を現在地にリセット
+                    nextBeatTimeNanos = System.nanoTime()
+                }
             }
         }
     }
